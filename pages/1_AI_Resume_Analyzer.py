@@ -21,7 +21,6 @@ st.set_page_config(
 
 # =====================================================
 # LOAD GEMINI API KEY
-# Supports local .env and Streamlit Cloud Secrets
 # =====================================================
 
 load_dotenv()
@@ -55,14 +54,13 @@ st.divider()
 def extract_resume_text(uploaded_file):
 
     try:
-        reader = PdfReader(
-            io.BytesIO(uploaded_file.getvalue())
-        )
+        pdf_bytes = uploaded_file.getvalue()
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
 
         extracted_text = []
 
         for page in reader.pages:
-
             page_text = page.extract_text()
 
             if page_text:
@@ -71,7 +69,6 @@ def extract_resume_text(uploaded_file):
         return "\n".join(extracted_text).strip()
 
     except Exception as error:
-
         raise ValueError(
             f"Unable to read PDF file: {error}"
         )
@@ -84,15 +81,14 @@ def extract_resume_text(uploaded_file):
 def analyze_resume(resume_text, target_role):
 
     if not GEMINI_API_KEY:
-
         raise ValueError(
             "Gemini API key not found. "
-            "Add GEMINI_API_KEY to Streamlit Cloud Secrets "
-            "or your local .env file."
+            "Check GEMINI_API_KEY in Streamlit Cloud Secrets."
         )
 
-    try:
+    client = None
 
+    try:
         client = genai.Client(
             api_key=GEMINI_API_KEY
         )
@@ -128,18 +124,56 @@ Explain that ATS scores cannot be guaranteed.
 Use beginner-friendly language.
 """
 
+        # Maximum 90 seconds for the complete request.
         interaction = client.interactions.create(
             model="gemini-3.8-flash",
-            input=prompt
+            input=prompt,
+            timeout=90,
+            automatic_continuation=False
         )
 
-        return interaction.output_text
+        analysis = interaction.output_text
+
+        if not analysis:
+            raise ValueError(
+                "Gemini returned an empty response."
+            )
+
+        return analysis
+
+    except TimeoutError:
+        raise RuntimeError(
+            "Gemini request timed out after 90 seconds. "
+            "Please try again. If the problem continues, "
+            "check your API quota and Gemini API status."
+        )
 
     except Exception as error:
+        error_message = str(error)
 
-        raise RuntimeError(
-            f"Gemini AI analysis error: {error}"
-        )
+        if "429" in error_message:
+            raise RuntimeError(
+                "Gemini API quota or rate limit exceeded. "
+                "Please wait and try again."
+            )
+
+        elif "401" in error_message or "403" in error_message:
+            raise RuntimeError(
+                "Gemini API authentication failed. "
+                "Check your API key in Streamlit Cloud Secrets."
+            )
+
+        else:
+            raise RuntimeError(
+                f"Gemini analysis failed: {error_message}"
+            )
+
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 # =====================================================
@@ -201,7 +235,8 @@ if st.button(
         try:
 
             with st.spinner(
-                "Gemini AI is analyzing your resume..."
+                "Gemini AI is analyzing your resume. "
+                "Please wait..."
             ):
 
                 resume_text = extract_resume_text(
@@ -222,12 +257,6 @@ if st.button(
                         target_role
                     )
 
-                    if not analysis:
-
-                        raise ValueError(
-                            "Gemini returned an empty response."
-                        )
-
                     st.session_state[
                         "resume_analysis"
                     ] = analysis
@@ -236,11 +265,13 @@ if st.button(
                         "resume_target_role"
                     ] = target_role
 
+                    st.success(
+                        "Resume analysis completed successfully!"
+                    )
+
         except Exception as error:
 
-            st.error(
-                "Resume analysis failed."
-            )
+            st.error("Resume analysis failed.")
 
             st.error(str(error))
 
@@ -252,10 +283,6 @@ if st.button(
 if "resume_analysis" in st.session_state:
 
     st.divider()
-
-    st.success(
-        "Resume analysis completed successfully!"
-    )
 
     st.subheader(
         "📊 Your AI Resume Report"
@@ -288,3 +315,4 @@ st.divider()
 st.caption(
     "AI Career Digital Twin | Powered by Google Gemini"
 )
+
