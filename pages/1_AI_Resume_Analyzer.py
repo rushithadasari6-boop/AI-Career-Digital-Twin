@@ -7,8 +7,10 @@ from dotenv import load_dotenv
 from google import genai
 from pypdf import PdfReader
 
-# Load Gemini API key
-load_dotenv()
+
+# =====================================================
+# PAGE CONFIGURATION
+# =====================================================
 
 st.set_page_config(
     page_title="AI Resume Analyzer",
@@ -16,10 +18,33 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# =====================================================
+# LOAD GEMINI API KEY
+# Supports local .env and Streamlit Cloud Secrets
+# =====================================================
+
+load_dotenv()
+
+try:
+    GEMINI_API_KEY = st.secrets.get(
+        "GEMINI_API_KEY",
+        os.getenv("GEMINI_API_KEY", "")
+    )
+except Exception:
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+
+# =====================================================
+# PAGE HEADER
+# =====================================================
+
 st.title("📄 AI-Powered Resume Analyzer")
+
 st.write(
     "Get personalized resume feedback powered by Google Gemini AI."
 )
+
 st.divider()
 
 
@@ -29,17 +54,27 @@ st.divider()
 
 def extract_resume_text(uploaded_file):
 
-    reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
+    try:
+        reader = PdfReader(
+            io.BytesIO(uploaded_file.getvalue())
+        )
 
-    extracted_text = []
+        extracted_text = []
 
-    for page in reader.pages:
-        page_text = page.extract_text()
+        for page in reader.pages:
 
-        if page_text:
-            extracted_text.append(page_text)
+            page_text = page.extract_text()
 
-    return "\n".join(extracted_text).strip()
+            if page_text:
+                extracted_text.append(page_text)
+
+        return "\n".join(extracted_text).strip()
+
+    except Exception as error:
+
+        raise ValueError(
+            f"Unable to read PDF file: {error}"
+        )
 
 
 # =====================================================
@@ -48,16 +83,21 @@ def extract_resume_text(uploaded_file):
 
 def analyze_resume(resume_text, target_role):
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
 
-    if not api_key:
         raise ValueError(
-            "Gemini API key not found. Check your .env file."
+            "Gemini API key not found. "
+            "Add GEMINI_API_KEY to Streamlit Cloud Secrets "
+            "or your local .env file."
         )
 
-    client = genai.Client(api_key=api_key)
+    try:
 
-    prompt = f"""
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+
+        prompt = f"""
 You are an experienced technical recruiter,
 ATS resume evaluator, and career mentor.
 
@@ -80,17 +120,26 @@ Provide a detailed report with these sections:
 10. FINAL RECOMMENDATIONS
 
 Be honest and constructive.
+
 Do not invent achievements, qualifications, or experience.
+
 Explain that ATS scores cannot be guaranteed.
+
 Use beginner-friendly language.
 """
 
-    interaction = client.interactions.create(
-        model="gemini-3.8-flash",
-        input=prompt
-    )
+        interaction = client.interactions.create(
+            model="gemini-3.8-flash",
+            input=prompt
+        )
 
-    return interaction.output_text
+        return interaction.output_text
+
+    except Exception as error:
+
+        raise RuntimeError(
+            f"Gemini AI analysis error: {error}"
+        )
 
 
 # =====================================================
@@ -143,7 +192,9 @@ if st.button(
 
     if uploaded_file is None:
 
-        st.warning("Please upload your PDF resume.")
+        st.warning(
+            "Please upload your PDF resume."
+        )
 
     else:
 
@@ -153,7 +204,9 @@ if st.button(
                 "Gemini AI is analyzing your resume..."
             ):
 
-                resume_text = extract_resume_text(uploaded_file)
+                resume_text = extract_resume_text(
+                    uploaded_file
+                )
 
                 if len(resume_text) < 100:
 
@@ -170,18 +223,26 @@ if st.button(
                     )
 
                     if not analysis:
+
                         raise ValueError(
                             "Gemini returned an empty response."
                         )
 
-                    st.session_state["resume_analysis"] = analysis
-                    st.session_state["resume_target_role"] = target_role
+                    st.session_state[
+                        "resume_analysis"
+                    ] = analysis
+
+                    st.session_state[
+                        "resume_target_role"
+                    ] = target_role
 
         except Exception as error:
 
-            st.error("Resume analysis failed.")
+            st.error(
+                "Resume analysis failed."
+            )
 
-            st.write(str(error))
+            st.error(str(error))
 
 
 # =====================================================
@@ -192,9 +253,13 @@ if "resume_analysis" in st.session_state:
 
     st.divider()
 
-    st.success("Resume analysis completed successfully!")
+    st.success(
+        "Resume analysis completed successfully!"
+    )
 
-    st.subheader("📊 Your AI Resume Report")
+    st.subheader(
+        "📊 Your AI Resume Report"
+    )
 
     st.write(
         "**Target Career:** "
