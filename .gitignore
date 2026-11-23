@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+
+venv/
+__pycache__/
+*.pyc
+
+career_twin.db
+*.db
+
+app_backup.py
+app_backup_old.py
+backupapp..py
+
+.streamlit/secrets.toml
