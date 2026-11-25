@@ -6,8 +6,7 @@ import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
-from pypdf import PdfReader
-from database import save_profile, get_profile
+from database import save_profile, get_profile, register_user, authenticate_user
 
 # =========================================================
 # PAGE CONFIGURATION
@@ -57,6 +56,70 @@ html, body, [class*="css"] {font-family:Inter,sans-serif;}
 @media(max-width:768px){.main-title{font-size:26px}.welcome-banner{padding:20px}.welcome-banner h2{font-size:21px}}
 </style>
 """, unsafe_allow_html=True)
+
+
+# =========================================================
+# LOCAL SQLITE AUTHENTICATION (NO SUPABASE)
+# Accounts and password hashes are stored in career_twin.db.
+# =========================================================
+if "auth_user_id" not in st.session_state:
+    st.session_state.auth_user_id = ""
+if "auth_email" not in st.session_state:
+    st.session_state.auth_email = ""
+
+if not st.session_state.auth_user_id:
+    st.markdown(
+        "<div class='main-title'>AI Career Digital Twin</div>"
+        "<div class='subtitle'>Create an account or log in to access your career dashboard.</div>",
+        unsafe_allow_html=True
+    )
+    login_tab, signup_tab = st.tabs(["Login", "Create account"])
+
+    with login_tab:
+        with st.form("login_form"):
+            login_email = st.text_input("Email address", key="login_email")
+            login_password = st.text_input("Password", type="password", key="login_password")
+            login_submit = st.form_submit_button("Login", use_container_width=True)
+
+        if login_submit:
+            account = authenticate_user(login_email.strip(), login_password)
+            if account:
+                st.session_state.auth_user_id = account["user_id"]
+                st.session_state.auth_email = account["email"]
+                st.rerun()
+            else:
+                st.error("Login failed. Check your email and password.")
+
+    with signup_tab:
+        with st.form("signup_form"):
+            signup_email = st.text_input("Email address", key="signup_email")
+            signup_password = st.text_input(
+                "Create password (at least 8 characters)", type="password", key="signup_password"
+            )
+            signup_confirm = st.text_input("Confirm password", type="password", key="signup_confirm")
+            signup_submit = st.form_submit_button("Create account", use_container_width=True)
+
+        if signup_submit:
+            email = signup_email.strip().lower()
+            if not email or "@" not in email:
+                st.error("Enter a valid email address.")
+            elif len(signup_password) < 8:
+                st.error("Password must contain at least 8 characters.")
+            elif signup_password != signup_confirm:
+                st.error("Passwords do not match.")
+            else:
+                account = register_user(email, signup_password)
+                if account:
+                    st.session_state.auth_user_id = account["user_id"]
+                    st.session_state.auth_email = account["email"]
+                    st.success("Account created successfully.")
+                    st.rerun()
+                else:
+                    st.error("An account with this email already exists. Please log in.")
+    st.stop()
+
+user_id = st.session_state.auth_user_id
+
 
 # =========================================================
 # CAREER AND SKILL DATA
@@ -299,75 +362,74 @@ DB_PATH = str(Path(__file__).resolve().parent / "career_twin.db")
 def initialize_roadmap_table():
     connection = sqlite3.connect(DB_PATH)
     connection.execute("""
-        CREATE TABLE IF NOT EXISTS roadmap_progress (
+        CREATE TABLE IF NOT EXISTS roadmap_progress_by_user (
+            user_id TEXT NOT NULL,
             career TEXT NOT NULL,
             skills_signature TEXT NOT NULL,
             task TEXT NOT NULL,
             completed INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT,
-            PRIMARY KEY (career, skills_signature, task)
+            PRIMARY KEY (user_id, career, skills_signature, task)
         )
     """)
     connection.execute("""
-        CREATE TABLE IF NOT EXISTS student_skill_assessments (
+        CREATE TABLE IF NOT EXISTS student_skill_assessments_by_user (
+            user_id TEXT NOT NULL,
             career TEXT NOT NULL,
             skill TEXT NOT NULL,
             proficiency INTEGER NOT NULL,
             updated_at TEXT,
-            PRIMARY KEY (career, skill)
+            PRIMARY KEY (user_id, career, skill)
         )
     """)
     connection.commit()
     connection.close()
 
-def get_saved_roadmap_progress(career, signature):
+def get_saved_roadmap_progress(user_id, career, signature):
     connection = sqlite3.connect(DB_PATH)
     rows = connection.execute("""
         SELECT task, completed
-        FROM roadmap_progress
-        WHERE career = ? AND skills_signature = ?
-    """, (career, signature)).fetchall()
+        FROM roadmap_progress_by_user
+        WHERE user_id = ? AND career = ? AND skills_signature = ?
+    """, (user_id, career, signature)).fetchall()
     connection.close()
     return {task: bool(completed) for task, completed in rows}
 
-def save_roadmap_progress(career, signature, task, completed):
+
+def save_roadmap_progress(user_id, career, signature, task, completed):
     connection = sqlite3.connect(DB_PATH)
     connection.execute("""
-        INSERT INTO roadmap_progress
-            (career, skills_signature, task, completed, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(career, skills_signature, task)
-        DO UPDATE SET
-            completed = excluded.completed,
-            updated_at = excluded.updated_at
-    """, (
-        career, signature, task, int(completed), datetime.now().isoformat()
-    ))
+        INSERT INTO roadmap_progress_by_user
+            (user_id, career, skills_signature, task, completed, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, career, skills_signature, task)
+        DO UPDATE SET completed = excluded.completed, updated_at = excluded.updated_at
+    """, (user_id, career, signature, task, int(completed), datetime.now().isoformat()))
     connection.commit()
     connection.close()
 
-def get_skill_assessments(career):
+
+def get_skill_assessments(user_id, career):
     connection = sqlite3.connect(DB_PATH)
     rows = connection.execute("""
         SELECT skill, proficiency
-        FROM student_skill_assessments
-        WHERE career = ?
-    """, (career,)).fetchall()
+        FROM student_skill_assessments_by_user
+        WHERE user_id = ? AND career = ?
+    """, (user_id, career)).fetchall()
     connection.close()
     return {skill: int(score) for skill, score in rows}
 
-def save_skill_assessments(career, assessment_values):
+
+def save_skill_assessments(user_id, career, assessment_values):
     connection = sqlite3.connect(DB_PATH)
     for skill, proficiency in assessment_values.items():
         connection.execute("""
-            INSERT INTO student_skill_assessments
-                (career, skill, proficiency, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(career, skill)
-            DO UPDATE SET
-                proficiency = excluded.proficiency,
-                updated_at = excluded.updated_at
-        """, (career, skill, int(proficiency), datetime.now().isoformat()))
+            INSERT INTO student_skill_assessments_by_user
+                (user_id, career, skill, proficiency, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, career, skill)
+            DO UPDATE SET proficiency = excluded.proficiency, updated_at = excluded.updated_at
+        """, (user_id, career, skill, int(proficiency), datetime.now().isoformat()))
     connection.commit()
     connection.close()
 
@@ -380,7 +442,6 @@ defaults = {
     "student_name": "",
     "education": "",
     "student_skills": [],
-    "resume_text": "",
     "profile_created": False,
     "target_career": "Not selected"
 }
@@ -389,66 +450,18 @@ for key, value in defaults.items():
         st.session_state[key] = value
 
 if not st.session_state.get("_profile_loaded", False):
-    saved_profile = get_profile()
+    saved_profile = get_profile(user_id)
     if saved_profile is not None:
         st.session_state.student_name = saved_profile["student_name"] or ""
         st.session_state.education = saved_profile["education"] or ""
         st.session_state.target_career = saved_profile["target_career"] or "Not selected"
         st.session_state.student_skills = saved_profile["student_skills"] or []
-        st.session_state.resume_text = saved_profile["resume_text"] or ""
         st.session_state.profile_created = True
     st.session_state["_profile_loaded"] = True
 
 # =========================================================
 # HELPER FUNCTIONS
 # =========================================================
-def extract_resume_text(uploaded_file):
-    try:
-        reader = PdfReader(uploaded_file)
-        extracted = []
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                extracted.append(page_text)
-        return "\n".join(extracted)
-    except Exception as error:
-        st.error(f"Could not read this PDF: {error}")
-        return ""
-
-def detect_skills(text):
-    if not text:
-        return []
-    normalized_text = re.sub(r"\s+", " ", text.lower())
-    aliases = {
-        "JavaScript": ["javascript", "js"],
-        "TypeScript": ["typescript", "ts"],
-        "React": ["react", "react.js", "reactjs"],
-        "Node.js": ["node.js", "nodejs", "node js"],
-        "Scikit-learn": ["scikit-learn", "scikit learn", "sklearn"],
-        "Machine Learning": ["machine learning", "ml"],
-        "Deep Learning": ["deep learning", "dl"],
-        "Artificial Intelligence": ["artificial intelligence", "ai"],
-        "Generative AI": ["generative ai", "genai", "gen ai"],
-        "Large Language Models": ["large language models", "large language model", "llm", "llms"],
-        "NLP": ["natural language processing", "nlp"],
-        "Computer Vision": ["computer vision", "opencv"],
-        "REST API": ["rest api", "restful api", "rest apis"],
-        "Data Structures": ["data structures", "data structure", "dsa"],
-        "OOP": ["object-oriented programming", "object oriented programming", "oops", "oop"],
-        "SQL": ["sql", "structured query language"],
-        "Power BI": ["power bi", "powerbi"],
-        "GitHub": ["github", "git hub"]
-    }
-    detected = []
-    for skill in SKILLS_DATABASE:
-        terms = aliases.get(skill, [skill.lower()])
-        for term in terms:
-            pattern = r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])"
-            if re.search(pattern, normalized_text):
-                detected.append(skill)
-                break
-    return sorted(set(detected))
-
 def calculate_career_scores(student_skills):
     skill_set = {skill.lower() for skill in student_skills}
     scores = {}
@@ -462,20 +475,20 @@ def calculate_career_scores(student_skills):
 
 def calculate_integrated_career_scores(student_skills):
     """
-    Estimate career readiness using resume evidence and saved self-assessments.
-    If no assessment exists for a career, retain the original resume-match score.
+    Estimate career readiness using selected skills and saved self-assessments.
+    If no assessment exists for a career, retain the original skill-match score.
     """
-    resume_scores = calculate_career_scores(student_skills)
+    skill_scores = calculate_career_scores(student_skills)
     skill_set = {skill.lower() for skill in student_skills}
     integrated = {}
 
     for career, requirements in CAREER_REQUIREMENTS.items():
-        assessments = get_skill_assessments(career)
-        base = resume_scores[career]
+        assessments = get_skill_assessments(user_id, career)
+        base = skill_scores[career]
         if not assessments:
             integrated[career] = {
                 **base,
-                "resume_score": base["score"],
+                "skill_match_score": base["score"],
                 "assessment_score": None,
                 "low_proficiency": [],
                 "assessed_count": 0,
@@ -485,16 +498,16 @@ def calculate_integrated_career_scores(student_skills):
         skill_points = []
         low_proficiency = []
         for skill in requirements:
-            in_resume = skill.lower() in skill_set
+            is_selected = skill.lower() in skill_set
             if skill in assessments:
                 rating = assessments[skill]
-                # Resume evidence contributes 40%; practical self-rating contributes 60%.
-                points = (40 if in_resume else 0) + (rating / 5 * 60)
+                # Selected skill evidence contributes 40%; practical self-rating contributes 60%.
+                points = (40 if is_selected else 0) + (rating / 5 * 60)
                 if rating <= 2:
                     low_proficiency.append(skill)
             else:
-                # Resume-listed but not yet self-rated skills receive a provisional score.
-                points = 60 if in_resume else 0
+                # Selected skills not yet self-rated receive a provisional score.
+                points = 60 if is_selected else 0
             skill_points.append(points)
 
         integrated_score = round(sum(skill_points) / len(requirements)) if requirements else 0
@@ -503,7 +516,7 @@ def calculate_integrated_career_scores(student_skills):
             "score": integrated_score,
             "matched": base["matched"],
             "missing": gaps,
-            "resume_score": base["score"],
+            "skill_match_score": base["score"],
             "assessment_score": round(
                 sum(assessments.values()) / (len(assessments) * 5) * 100
             ) if assessments else None,
@@ -602,7 +615,7 @@ def badge_html(items, badge_class=""):
 
 def roadmap_callback(career, signature, task, widget_key):
     save_roadmap_progress(
-        career, signature, task, st.session_state.get(widget_key, False)
+        user_id, career, signature, task, st.session_state.get(widget_key, False)
     )
 
 # =========================================================
@@ -633,6 +646,11 @@ with st.sidebar:
     else:
         st.warning("Profile not created")
     st.divider()
+    st.caption(f"Signed in: {st.session_state.auth_email}")
+    if st.button("Log out", use_container_width=True):
+        for auth_key in ["auth_user_id", "auth_email", "_profile_loaded"]:
+            st.session_state.pop(auth_key, None)
+        st.rerun()
     st.caption("AI Career Digital Twin v2.0")
 
 # =========================================================
@@ -657,7 +675,12 @@ with st.expander("⚙️ Student Profile Setup", expanded=not st.session_state.p
             index=career_options.index(st.session_state.target_career)
             if st.session_state.target_career in career_options else 0
         )
-        uploaded_resume = st.file_uploader("Upload Resume PDF", type=["pdf"])
+        selected_skills = st.multiselect(
+            "Select your current technical skills",
+            options=SKILLS_DATABASE,
+            default=st.session_state.student_skills,
+            help="Choose the skills you currently know. You can update this list anytime."
+        )
 
     if st.button("💾 Save Profile", use_container_width=True):
         if not name.strip():
@@ -665,26 +688,18 @@ with st.expander("⚙️ Student Profile Setup", expanded=not st.session_state.p
         elif target_career == "Not selected":
             st.error("Please select a target career.")
         else:
-            resume_text = st.session_state.resume_text
-            if uploaded_resume is not None:
-                extracted_text = extract_resume_text(uploaded_resume)
-                if extracted_text:
-                    resume_text = extracted_text
-                else:
-                    st.warning("The PDF text could not be extracted. Your previous resume text was kept.")
-            detected = detect_skills(resume_text)
             save_profile(
+                user_id=user_id,
                 student_name=name.strip(),
                 education=education.strip(),
                 target_career=target_career,
-                student_skills=detected,
-                resume_text=resume_text
+                student_skills=selected_skills,
+                resume_text=""
             )
             st.session_state.student_name = name.strip()
             st.session_state.education = education.strip()
             st.session_state.target_career = target_career
-            st.session_state.resume_text = resume_text
-            st.session_state.student_skills = detected
+            st.session_state.student_skills = selected_skills
             st.session_state.profile_created = True
             st.success("Profile saved successfully. Your Digital Twin is ready.")
             st.rerun()
@@ -695,7 +710,7 @@ with st.expander("⚙️ Student Profile Setup", expanded=not st.session_state.p
 # Best career match remains available for recommendations.
 # =========================================================
 skills = st.session_state.student_skills
-resume_scores = calculate_career_scores(skills)
+skill_scores = calculate_career_scores(skills)
 scores = calculate_integrated_career_scores(skills)
 best_career = get_best_career(scores)
 selected_career = st.session_state.target_career
@@ -706,7 +721,7 @@ else:
     active_career = best_career
 
 active_assessments = (
-    get_skill_assessments(active_career)
+    get_skill_assessments(user_id, active_career)
     if active_career in CAREER_REQUIREMENTS else {}
 )
 
@@ -727,7 +742,7 @@ else:
 learning_tasks = get_learning_tasks(missing_for_active)
 task_skill_map = get_task_skill_map(missing_for_active)
 skills_signature = json.dumps(sorted(missing_for_active), ensure_ascii=False)
-saved_progress = get_saved_roadmap_progress(active_career, skills_signature) if active_career in CAREER_REQUIREMENTS else {}
+saved_progress = get_saved_roadmap_progress(user_id, active_career, skills_signature) if active_career in CAREER_REQUIREMENTS else {}
 completed_tasks = [task for task in learning_tasks if saved_progress.get(task, False)]
 learning_progress = round(len(completed_tasks) / len(learning_tasks) * 100) if learning_tasks else 100
 
@@ -742,10 +757,10 @@ if page == "🏠 Dashboard":
         st.markdown("""
             <div class="welcome-banner">
                 <h2>Welcome to your AI Career Digital Twin 🚀</h2>
-                <p>Create your student profile and upload your resume to generate personalized career insights.</p>
+                <p>Create your student profile and select your current skills to generate personalized career insights.</p>
             </div>
         """, unsafe_allow_html=True)
-        show_empty_state("👤", "Create your profile to begin", "Add your name, education, target career and resume above.")
+        show_empty_state("👤", "Create your profile to begin", "Add your name, education, target career and current skills above.")
     else:
         st.markdown(f"""
             <div class="welcome-banner">
@@ -755,9 +770,9 @@ if page == "🏠 Dashboard":
         """, unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.markdown(f"<div class='metric-card'><div class='metric-label'>ESTIMATED CAREER READINESS</div><div class='metric-value'>{readiness_score}%</div><div class='metric-subtitle'>{readiness_level(readiness_score)} level · resume + self-assessment</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card'><div class='metric-label'>ESTIMATED CAREER READINESS</div><div class='metric-value'>{readiness_score}%</div><div class='metric-subtitle'>{readiness_level(readiness_score)} level · skills + self-assessment</div></div>", unsafe_allow_html=True)
         with c2:
-            st.markdown(f"<div class='metric-card'><div class='metric-label'>DETECTED SKILLS</div><div class='metric-value'>{len(skills)}</div><div class='metric-subtitle'>From your resume</div></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-card'><div class='metric-label'>SELECTED SKILLS</div><div class='metric-value'>{len(skills)}</div><div class='metric-subtitle'>Selected in your profile</div></div>", unsafe_allow_html=True)
         with c3:
             st.markdown(f"<div class='metric-card'><div class='metric-label'>BEST CAREER MATCH</div><div class='metric-value' style='font-size:19px;'>{best_career}</div><div class='metric-subtitle'>{best_career_score}% compatibility</div></div>", unsafe_allow_html=True)
         with c4:
@@ -780,7 +795,7 @@ if page == "🏠 Dashboard":
                 bool(st.session_state.student_name),
                 bool(st.session_state.education),
                 st.session_state.target_career != "Not selected",
-                bool(st.session_state.resume_text)
+                bool(st.session_state.student_skills)
             ]) * 25
             st.markdown(f"""
                 <div class="content-card">
@@ -794,13 +809,13 @@ if page == "🏠 Dashboard":
         if skills:
             st.markdown(f"<div class='content-card'>{badge_html(skills, 'badge-green')}</div>", unsafe_allow_html=True)
         else:
-            show_empty_state("📄", "No skills detected yet", "Upload a resume containing your technical skills.")
+            show_empty_state("📄", "No skills selected yet", "Select your current technical skills in Profile Setup.")
 
         st.markdown("<div class='section-heading'>Priority Skill Gaps</div>", unsafe_allow_html=True)
         if missing_for_active:
             st.markdown(f"<div class='content-card'>{badge_html(missing_for_active, 'badge-orange')}</div>", unsafe_allow_html=True)
         else:
-            st.success("Your detected skills cover all listed requirements for the selected career.")
+            st.success("Your selected skills cover all listed requirements for the selected career.")
 
         st.markdown("<div class='section-heading'>Career Compatibility</div>", unsafe_allow_html=True)
         chart_data = pd.DataFrame({
@@ -836,7 +851,7 @@ elif page == "🧬 Digital Twin":
             strength_data = pd.DataFrame({"Strength": [100] * min(len(skills), 12)}, index=skills[:12])
             st.bar_chart(strength_data, height=350)
         else:
-            show_empty_state("📊", "Visualization unavailable", "Upload a resume to populate your Digital Twin skill profile.")
+            show_empty_state("📊", "Visualization unavailable", "Select your current skills in Profile Setup to populate your Digital Twin.")
         left, right = st.columns(2)
         with left:
             st.markdown("<div class='content-card'><h3>💪 Skill Strengths</h3>", unsafe_allow_html=True)
@@ -846,7 +861,7 @@ elif page == "🧬 Digital Twin":
             st.markdown("<div class='content-card'><h3>📈 Development Areas</h3>", unsafe_allow_html=True)
             st.markdown(badge_html(missing_for_active, "badge-orange"), unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
-        st.info("Your Digital Twin combines resume-detected skills with saved proficiency self-assessments when available. Advanced AI behavior prediction can be integrated in a later backend phase.")
+        st.info("Your Digital Twin combines selected skills with saved proficiency self-assessments when available. Advanced AI behavior prediction can be integrated in a later backend phase.")
 
 # =========================================================
 # SKILL GAP ANALYSIS
@@ -855,7 +870,7 @@ elif page == "🎯 Skill Gap Analysis":
     st.markdown("<div class='main-title'>Skill Gap Analysis</div>", unsafe_allow_html=True)
     st.markdown("<div class='subtitle'>Compare your current capabilities with the requirements of your target career.</div>", unsafe_allow_html=True)
     if not st.session_state.profile_created:
-        show_empty_state("🎯", "Skill analysis unavailable", "Create your profile and upload a resume first.")
+        show_empty_state("🎯", "Skill analysis unavailable", "Create your profile and select your current skills first.")
     else:
         career_list = list(CAREER_REQUIREMENTS.keys())
         chosen = st.selectbox(
@@ -868,7 +883,7 @@ elif page == "🎯 Skill Gap Analysis":
         skill_set = {skill.lower() for skill in skills}
         matched = [skill for skill in required if skill.lower() in skill_set]
         missing = [skill for skill in required if skill.lower() not in skill_set]
-        chosen_assessments = get_skill_assessments(chosen)
+        chosen_assessments = get_skill_assessments(user_id, chosen)
         low_proficiency = [
             skill for skill in required
             if chosen_assessments.get(skill, 5) <= 2 and skill in chosen_assessments
@@ -881,18 +896,18 @@ elif page == "🎯 Skill Gap Analysis":
         score = chosen_score_data["score"]
         c1, c2, c3 = st.columns(3)
         c1.metric("Required Skills", len(required))
-        c2.metric("Resume Matched", len(matched))
+        c2.metric("Skills Matched", len(matched))
         c3.metric("Estimated Readiness", f"{score}%")
         st.progress(score / 100)
         st.caption(
-            f"Resume matches {len(matched)} of {len(required)} required skills. "
+            f"Selected skills match {len(matched)} of {len(required)} required skills. "
             "Estimated readiness also uses saved proficiency ratings when available."
         )
-        chosen_assessments = get_skill_assessments(chosen)
+        chosen_assessments = get_skill_assessments(user_id, chosen)
         chosen_low = [skill for skill, rating in chosen_assessments.items() if rating <= 2]
         if chosen_assessments:
             st.info(
-                f"Assessment-aware readiness combines resume evidence and your self-ratings. "
+                f"Assessment-aware readiness combines selected skills and your self-ratings. "
                 f"{len(chosen_assessments)} skills assessed; {len(chosen_low)} rated Beginner or Basic."
             )
         left, right = st.columns(2)
@@ -917,7 +932,7 @@ elif page == "🎯 Skill Gap Analysis":
                 rating_note = (
                     f"Self-rating: {chosen_assessments[skill]}/5"
                     if skill in chosen_assessments else
-                    ("Not detected in resume" if skill in missing else "Not assessed yet")
+                    ("Not selected in profile" if skill in missing else "Not assessed yet")
                 )
                 rows.append({
                     "Priority": get_skill_priority(skill, index, len(combined_gaps)),
@@ -928,16 +943,16 @@ elif page == "🎯 Skill Gap Analysis":
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.info("Start with High-priority skills, then work through Medium and Low priorities.")
         else:
-            st.success("Great work! Your resume and saved self-assessments show no current high-priority gaps.")
+            st.success("Great work! Your selected skills and saved self-assessments show no current high-priority gaps.")
         with st.expander("How is the skill match calculated?"):
-            st.write("Resume Skill Match = (Skills detected in your resume ÷ Total required career skills) × 100. Estimated Career Readiness uses resume evidence (40%) and saved self-ratings (60%) for rated skills. Skills rated 1 or 2 are added to your learning plan. These are estimates based partly on self-assessment, not verified test results.")
+            st.write("Skill Match = (Selected required skills ÷ Total required career skills) × 100. Estimated Career Readiness uses selected skill evidence (40%) and saved self-ratings (60%) for rated skills. Skills rated 1 or 2 are added to your learning plan. These are estimates based partly on self-assessment, not verified test results.")
 
 # =========================================================
 # PERSONALIZED LEARNING ROADMAP
 # =========================================================
 elif page == "📚 Learning Roadmap":
     st.markdown("<div class='main-title'>Personalized Learning Roadmap</div>", unsafe_allow_html=True)
-    st.markdown("<div class='subtitle'>A career-specific weekly plan generated from resume gaps and lower proficiency ratings.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtitle'>A career-specific weekly plan generated from skill gaps and lower proficiency ratings.</div>", unsafe_allow_html=True)
 
     if not st.session_state.profile_created:
         show_empty_state("📚", "Roadmap not available", "Create your profile to generate a personalized roadmap.")
@@ -950,12 +965,12 @@ elif page == "📚 Learning Roadmap":
         st.markdown(f"""
             <div class="content-card">
                 <h3>🎯 Recommended Path: {active_career}</h3>
-                <p style="color:#64748b;">This plan is generated from {len(missing_for_active)} resume gaps and/or low-proficiency skills.</p>
+                <p style="color:#64748b;">This plan is generated from {len(missing_for_active)} skill gaps and/or low-proficiency skills.</p>
                 <b>Target career match: {readiness_score}%</b>
             </div>
         """, unsafe_allow_html=True)
 
-        saved_progress = get_saved_roadmap_progress(active_career, skills_signature)
+        saved_progress = get_saved_roadmap_progress(user_id, active_career, skills_signature)
         task_skill_map = get_task_skill_map(missing_for_active)
         total_tasks = len(learning_tasks)
         week_number = 1
@@ -1013,9 +1028,9 @@ elif page == "📚 Learning Roadmap":
 
         with st.expander("How this roadmap is personalized"):
             st.write(
-                f"The roadmap uses your saved target career ({active_career}), compares detected resume skills with career requirements, "
+                f"The roadmap uses your saved target career ({active_career}), compares your selected skills with career requirements, "
                 "and adds skills rated Beginner or Basic to the learning plan. Lowest self-rated skills are prioritized first. "
-                "If your target career, resume skills, or assessment ratings change, "
+                "If your target career, selected skills, or assessment ratings change, "
                 "a new roadmap is generated. Previous progress is retained for its matching career and skill-gap combination."
             )
 
@@ -1046,7 +1061,7 @@ elif page == "📈 Progress Tracking":
             "Percentage": [readiness_score, learning_progress]
         }, index=["Career Readiness", "Learning Progress"])
         st.bar_chart(progress_data, height=280)
-        st.caption(f"Progress is being tracked for {active_career}. Readiness uses resume evidence and saved self-assessment ratings when available.")
+        st.caption(f"Progress is being tracked for {active_career}. Readiness uses selected skills and saved self-assessment ratings when available.")
 
 # =========================================================
 # SKILL PROFICIENCY ASSESSMENT
@@ -1064,7 +1079,7 @@ elif page == "🧪 Skill Proficiency Assessment":
         show_empty_state("🎯", "Choose a target career", "Select a target career in Student Profile Setup.")
     else:
         required_skills = CAREER_REQUIREMENTS[active_career]
-        existing_assessments = get_skill_assessments(active_career)
+        existing_assessments = get_skill_assessments(user_id, active_career)
 
         st.markdown(f"### Assessment for {active_career}")
         st.caption("Use the scale below: 1 = Beginner, 2 = Basic, 3 = Intermediate, 4 = Advanced, 5 = Confident.")
@@ -1079,16 +1094,16 @@ elif page == "🧪 Skill Proficiency Assessment":
                     max_value=5,
                     value=default_score,
                     key=f"assessment_{active_career}_{skill}",
-                    help="Rate your current practical ability, not just whether the skill appears on your resume."
+                    help="Rate your current practical ability, based on your practical ability."
                 )
             submitted = st.form_submit_button("Save Skill Assessment", use_container_width=True)
 
         if submitted:
-            save_skill_assessments(active_career, assessment_values)
+            save_skill_assessments(user_id, active_career, assessment_values)
             st.success("Your skill proficiency assessment has been saved.")
             st.rerun()
 
-        latest_assessments = get_skill_assessments(active_career)
+        latest_assessments = get_skill_assessments(user_id, active_career)
         if latest_assessments:
             average_score = sum(latest_assessments.get(skill, 1) for skill in required_skills) / len(required_skills)
             percentage = round(average_score / 5 * 100)
@@ -1134,7 +1149,7 @@ elif page == "🤖 Career Recommendation":
     else:
         ranked = sorted(scores.items(), key=lambda item: item[1]["score"], reverse=True)
         st.info(
-            "Recommendations use resume skill matches. For careers with saved proficiency ratings, "
+            "Recommendations use your selected skill matches. For careers with saved proficiency ratings, "
             "the score also considers those self-assessments."
         )
         for rank, (career, data) in enumerate(ranked, start=1):
@@ -1146,7 +1161,7 @@ elif page == "🤖 Career Recommendation":
             """, unsafe_allow_html=True)
             st.progress(data["score"] / 100)
             st.caption(
-                f"Resume matches: {len(data['matched'])} | "
+                f"Selected skills match: {len(data['matched'])} | "
                 f"Skills to improve: {len(data['missing'])} | "
                 f"Assessed skills: {data.get('assessed_count', 0)}"
             )
